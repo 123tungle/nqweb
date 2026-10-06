@@ -106,9 +106,15 @@ class PasswordIn(BaseModel):
 @app.post("/api/login")
 def login(body: LoginIn, request: Request):
     name = body.username.strip()
+    # 0) chặn nếu tài khoản đang bị khóa do nhập sai nhiều lần
+    khoa = appdb.kiem_khoa(name)
+    if khoa["bi_khoa"]:
+        appdb.log(name[:50], "Đăng nhập bị chặn", "đang khóa")
+        raise HTTPException(423, khoa["thong_bao"])
     # 1) tài khoản riêng của web (quản trị web)
     u = appdb.get_user(name)
     if u and u["dang_dung"] and appdb.check_password(body.password, u["mat_khau"]):
+        appdb.reset_that_bai(name)
         request.session.update({"u": u["ten_dang_nhap"], "src": "local"})
         appdb.log(u["ten_dang_nhap"], "Đăng nhập")
         return {"ok": True}
@@ -118,16 +124,39 @@ def login(body: LoginIn, request: Request):
     except Exception:
         row = None
     if row:
+        appdb.reset_that_bai(name)
         request.session.update({"u": row["UserName"], "src": "sy_user"})
         appdb.log(row["UserName"], "Đăng nhập (SY_User)")
         return {"ok": True}
-    appdb.log(name[:50], "Đăng nhập sai")
-    raise HTTPException(401, "Sai tên đăng nhập hoặc mật khẩu")
+    # 3) sai mật khẩu -> ghi nhận, áp khóa nếu tới ngưỡng
+    st = appdb.ghi_that_bai(name)
+    appdb.log(name[:50], "Đăng nhập sai", f"lần thứ {st['so_lan_sai']}")
+    khoa = appdb.kiem_khoa(name)
+    if khoa["bi_khoa"]:
+        raise HTTPException(423, khoa["thong_bao"])
+    con_lai = appdb.KHOA_NGUONG_1 - st["so_lan_sai"]
+    msg = "Sai tên đăng nhập hoặc mật khẩu."
+    if 0 < con_lai <= 2:
+        msg += f" Còn {con_lai} lần trước khi tài khoản bị tạm khóa."
+    raise HTTPException(401, msg)
 
 
 @app.post("/api/logout")
 def logout(request: Request):
     request.session.clear()
+    return {"ok": True}
+
+
+# -------- Khóa đăng nhập: admin xem danh sách & mở khóa --------
+@app.get("/api/khoa/danh-sach")
+def khoa_danh_sach(u: dict = Depends(admin_user)):
+    return appdb.ds_khoa()
+
+
+@app.post("/api/khoa/mo/{name}")
+def khoa_mo(name: str, u: dict = Depends(admin_user)):
+    appdb.mo_khoa(name)
+    appdb.log(u["ten_dang_nhap"], "Mở khóa đăng nhập", name)
     return {"ok": True}
 
 
