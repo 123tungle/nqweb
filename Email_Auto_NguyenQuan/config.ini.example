@@ -1,0 +1,49 @@
+; ===== Cấu hình Web Nguyên Quân =====
+; Sửa xong LƯU file rồi chạy lại run.bat
+
+[database]
+; Database phần mềm bán hàng. Web CHỈ ĐỌC, không ghi gì vào đây.
+type = mssql
+; Máy local: LTT\SQL2016. Khi lên VPS: địa chỉ IP hoặc tên máy SQL Server
+server = LTT\SQL2016
+database = NppNguyenQuan
+; Nên dùng tài khoản chỉ đọc nqweb_doc (tạo bằng sql\tao_login_chi_doc.sql). Để trống user = đăng nhập Windows
+user = sa
+password =
+; setup.bat tự dò driver ODBC có trên máy và điền vào đây
+driver = ODBC Driver 17 for SQL Server
+extra = TrustServerCertificate=yes
+
+[app]
+port = 8090
+company = NGUYÊN QUÂN
+company_sub = Công ty TNHH TM DV Nguyên Quân
+; Số dòng tối đa mỗi lần tìm / chạy báo cáo
+max_rows = 5000
+; Thời gian chờ tối đa mỗi câu lệnh SQL (giây)
+query_timeout = 120
+; true = đọc không chờ khóa bảng (như WITH NOLOCK), tránh treo khi phần mềm đang ghi
+doc_khong_cho_khoa = true
+; true = tài khoản quản trị thấy cả các menu đang tắt (isDisable) trong WA_Menu
+hien_menu_dang_tat = false
+; Nhân viên đăng nhập bằng tài khoản trong phần mềm (SY_User). Các nhóm sau được quyền quản trị web:
+bms_admin_groups = Admin,Admin1,Admin2,Admin3
+; Bảng mã khi băm mật khẩu SY_User (chỉ đổi nếu mật khẩu có dấu tiếng Việt đăng nhập không được)
+bms_pass_encoding = utf-8
+
+[email]
+; ===== Gửi email báo cáo cuối ngày (PHẦN 02) =====
+; Máy chủ SMTP để gửi mail. Ví dụ Gmail: smtp.gmail.com
+host = smtp.gmail.com
+; Cổng: 587 (STARTTLS, phổ biến) hoặc 465 (SSL)
+port = 587
+; true nếu dùng cổng 465 (SSL). Để false nếu dùng 587.
+use_ssl = false
+; true để bật STARTTLS (dùng với cổng 587)
+use_tls = true
+; Tài khoản email gửi đi
+user = tenban@gmail.com
+; Mật khẩu ứng dụng (Gmail: tạo "App password", KHÔNG dùng mật khẩu đăng nhập thường)
+password =
+; Địa chỉ hiển thị người gửi (thường trùng user)
+from = tenban@gmail.com
