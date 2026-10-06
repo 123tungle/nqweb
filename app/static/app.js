@@ -393,7 +393,6 @@ async function pageList(seq, id) {
         ${meta.entry?.add ? `<a class="btn" href="#/order/${esc(id)}/new">+ Thêm ${esc(meta.entry.ten.toLowerCase())}</a>` : ""}
         <button class="btn primary" id="bFind" type="button">Tìm</button></div>
     </div>
-    ${meta.entry === null && /đơn hàng/i.test(meta.title) && S.me.admin ? `<p class="note">Muốn nhập đơn trên màn hình này: chạy file <b>sql\\NQW_CapNhatDatabase.sql</b> trong SSMS.</p>` : ""}
     <div class="card grid-card list-page" id="grid"></div>`;
   const flt = $("#flt");
   const ctrls = {};
@@ -431,7 +430,6 @@ async function pageList(seq, id) {
   $("#bFind").onclick = load;
   $("#fq").addEventListener("keydown", (e) => { if (e.key === "Enter") load(); });
   if ($("#bXls")) $("#bXls").onclick = async () => { try { await download(`/api/list/${id}/excel`, body()); } catch (e) { toast(e.message, true); } };
-  $("#fltNote").textContent = meta.has_date ? "Mặc định: từ hôm qua đến 14 ngày tới (giống web cũ)." : "";
   load();
 }
 
@@ -807,13 +805,42 @@ async function pageUsers(seq) {
     <div class="toolbar"><p class="note grow">Tài khoản đăng nhập web lưu riêng trong web này. Quyền xem menu lấy theo <b>nhóm</b> trong phần mềm (bảng phân quyền web WA_UserGroupPermisstion). Gán <b>mã nhân viên</b> thì người dùng chỉ thấy dữ liệu của nhân viên đó.</p>
       <button class="btn primary" id="bAdd">Thêm người dùng</button></div>
     ${lists.loi ? `<div class="errbox">Không đọc được nhóm/nhân viên từ database: ${esc(lists.loi)}</div>` : ""}
-    <div class="card grid-card" id="ugrid"></div>`;
+    <div class="card grid-card" id="ugrid"></div>
+    <div id="khoaBox"></div>`;
   const cols = [{ name: "u", caption: "Tên đăng nhập" }, { name: "n", caption: "Họ tên" }, { name: "r", caption: "Vai trò" },
     { name: "g", caption: "Nhóm quyền" }, { name: "e", caption: "Chỉ xem NV" }, { name: "s", caption: "Trạng thái" }];
   const rows = users.map((u) => [u.ten_dang_nhap, u.ho_ten, u.la_admin ? "Quản trị" : "Người dùng",
     u.nhom ? `${u.nhom}${gname[u.nhom] ? " – " + gname[u.nhom] : ""}` : "", u.ma_nv || "", u.dang_dung ? "Đang dùng" : "Đã khóa"]);
   new Grid($("#ugrid"), { cols, rows, pageSize: 0, onRow: (i) => userDialog(users[i], lists) });
   $("#bAdd").onclick = () => userDialog(null, lists);
+  loadKhoa(seq);
+}
+
+async function loadKhoa(seq) {
+  const box = $("#khoaBox");
+  if (!box) return;
+  let ds = [];
+  try { ds = await api("/api/khoa/danh-sach"); } catch (_) { return; }
+  if (stale(seq) || !box.isConnected) return;
+  if (!ds.length) {
+    box.innerHTML = `<p class="note" style="margin-top:14px">Không có tài khoản nào đang bị khóa đăng nhập.</p>`;
+    return;
+  }
+  box.innerHTML = `<h3 style="margin:18px 0 8px">Tài khoản đang bị khóa đăng nhập (${ds.length})</h3>
+    <div class="card grid-card"><table class="grid"><thead><tr>
+      <th>Tên đăng nhập</th><th class="num">Số lần sai</th><th>Tình trạng</th><th></th>
+    </tr></thead><tbody>${ds.map((k) => `<tr>
+      <td>${esc(k.ten_dang_nhap)}</td>
+      <td class="num">${k.so_lan_sai}</td>
+      <td>${k.vinh_vien ? "Khóa (chờ admin mở)" : `Tạm khóa, còn ~${k.con_phut} phút`}</td>
+      <td><button class="btn primary small" data-mo="${esc(k.ten_dang_nhap)}">Mở khóa</button></td>
+    </tr>`).join("")}</tbody></table></div>`;
+  $$("[data-mo]", box).forEach((b) => b.onclick = async () => {
+    const name = b.getAttribute("data-mo");
+    if (!confirm("Mở khóa đăng nhập cho tài khoản " + name + "?")) return;
+    try { await api("/api/khoa/mo/" + encodeURIComponent(name), { method: "POST" }); toast("Đã mở khóa " + name); route(); }
+    catch (err) { toast(err.message, true); }
+  });
 }
 function userDialog(u, lists) {
   const isNew = !u;

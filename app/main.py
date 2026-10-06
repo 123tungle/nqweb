@@ -290,7 +290,7 @@ def list_meta(menu_id: str, u: dict = Depends(current_user)):
     today = date.today()
     return {"title": m["VN"], "excel": m["excel"], "has_date": bool(d["master"]["date"]),
             "date_caption": (fm.get((d["master"]["date"] or "").lower()) or {}).get("caption") or "Ngày",
-            "tu": (today - timedelta(days=1)).isoformat(), "den": (today + timedelta(days=14)).isoformat(),
+            "tu": today.isoformat(), "den": today.isoformat(),
             "filters": filters, "has_detail": bool(d["detail"]), "entry": _entry(m)}
 
 
