@@ -516,6 +516,15 @@ async function pageOrder(seq, id, key) {
   if (stale(seq)) return;
   const ent = meta.entry;
   if (!ent) { view.innerHTML = `<div class="errbox">Màn hình này chưa nhập đơn được. Quản trị cần chạy file sql\\NQW_CapNhatDatabase.sql.</div>`; return; }
+  // Cấu hình form theo bảng ZNQW_* (nếu chưa cài thì cfg=null, form chạy như mặc định)
+  let cfg = null;
+  try { const cr = await api(`/api/order/${id}/config`); cfg = cr.cfg; } catch (_) { /* chưa cài lớp cấu hình */ }
+  if (stale(seq)) return;
+  const donCfg = {};
+  if (cfg) for (const c of (cfg.vung?.DON || [])) donCfg[c.name] = c;
+  const dlbl = (name, fb) => (donCfg[name]?.label) || fb;   // nhãn lấy từ cấu hình, không có thì dùng mặc định
+  const outDrop = donCfg.OutputType?.dropdown || "OUTPUTTYPE";
+  const outOpts = cfg ? (cfg.dropdowns?.[outDrop] || []) : [];
   let doc = null;
   if (key) {
     doc = await api(`/api/order/${id}/doc/${encodeURIComponent(key)}`);
@@ -535,15 +544,17 @@ async function pageOrder(seq, id, key) {
       ${readOnly ? `<span class="chip">Đơn đã gửi duyệt / đã duyệt – chỉ xem</span>` : ""}</div>
     <div id="oMsg"></div>
     <section class="card"><div class="form-view order-head">
-      <div class="f"><label>Số CT</label><div class="v">${esc(key || "(tự cấp khi lưu)")}</div></div>
-      <div class="f"><label for="oNgay">Ngày CT</label><input id="oNgay" type="date" value="${esc((h.DocumentDate || today).slice(0, 10))}"></div>
+      <div class="f"><label>${esc(dlbl("DocumentID", "Số CT"))}</label><div class="v">${esc(key || "(tự cấp khi lưu)")}</div></div>
+      <div class="f"><label for="oNgay">${esc(dlbl("DocumentDate", "Ngày CT"))}</label><input id="oNgay" type="date" value="${esc((h.DocumentDate || today).slice(0, 10))}"></div>
+      ${outOpts.length ? `<div class="f" id="oOutWrap"></div>` : ""}
       <div class="f" id="oEmpWrap"></div>
       <div class="f wide2" id="oCustWrap"></div>
-      <div class="f"><label>Tên khách hàng</label><div class="v" id="oCustName">&nbsp;</div></div>
-      <div class="f wide2"><label>Địa chỉ</label><div class="v" id="oCustAddr">&nbsp;</div></div>
-      <div class="f"><label>Nợ đầu</label><div class="v n" id="oNoDau">&nbsp;</div></div>
-      <div class="f"><label for="oPhone">Điện thoại</label><input id="oPhone" value="${esc(h.Phone || "")}" maxlength="50"></div>
-      <div class="f"><label for="oGiao">Ngày giao</label><input id="oGiao" type="date" value="${esc((h.DeliveryDate || tomorrow).slice(0, 10))}"></div>
+      <div class="f"><label>${esc(dlbl("ObjectName", "Tên khách hàng"))}</label><div class="v" id="oCustName">&nbsp;</div></div>
+      <div class="f wide2"><label>${esc(dlbl("Address", "Địa chỉ"))}</label><div class="v" id="oCustAddr">&nbsp;</div></div>
+      <div class="f"><label>${esc(dlbl("NoDau", "Nợ đầu"))}</label><div class="v n" id="oNoDau">&nbsp;</div></div>
+      ${donCfg.MST ? `<div class="f"><label>${esc(dlbl("MST", "MST"))}</label><div class="v" id="oCustMst">&nbsp;</div></div>` : ""}
+      <div class="f"><label for="oPhone">${esc(dlbl("Phone", "Điện thoại"))}</label><input id="oPhone" value="${esc(h.Phone || "")}" maxlength="50"></div>
+      <div class="f"><label for="oGiao">${esc(dlbl("DeliveryDate", "Ngày giao"))}</label><input id="oGiao" type="date" value="${esc((h.DeliveryDate || tomorrow).slice(0, 10))}"></div>
       <div class="f"><label>&nbsp;</label><label class="check"><input id="oTrongNgay" type="checkbox" ${h.isTrongNgay ? "checked" : ""}> Giao trong ngày</label></div>
       <div class="f"><label>&nbsp;</label><label class="check"><input id="oKhongKM" type="checkbox" ${h.isKhongKM ? "checked" : ""}> Không khuyến mãi</label></div>
       <div class="f wide2"><label for="oMemo">Ghi chú</label><input id="oMemo" value="${esc(h.Memo || "")}" maxlength="200"></div>
@@ -567,6 +578,15 @@ async function pageOrder(seq, id, key) {
   const emp = combo({ label: "Nhân viên bán hàng", value: h.EmployeeID || S.me.ma_nv || "", locked: !!S.me.ma_nv || readOnly,
     placeholder: "Chọn nhân viên", load: () => api(`/api/order/${id}/employees`) });
   $("#oEmpWrap").append(emp.el);
+
+  // loại đơn hàng (OutputType) – dropdown theo cấu hình, mặc định SO
+  let outType = h.OutputType || donCfg.OutputType?.mac_dinh || "SO";
+  let outCombo = null;
+  if (outOpts.length) {
+    outCombo = combo({ label: dlbl("OutputType", "Loại đơn hàng"), value: outType,
+      locked: readOnly || !!donCfg.OutputType?.locked, placeholder: "Chọn loại đơn", load: async () => outOpts });
+    $("#oOutWrap").append(outCombo.el);
+  }
 
   // khách hàng: tìm trên server theo nhân viên + chữ gõ
   const cw = $("#oCustWrap");
@@ -592,6 +612,7 @@ async function pageOrder(seq, id, key) {
       custIn.value = `${c.ObjectID} - ${c.ObjectName}`;
       $("#oCustName").textContent = c.ObjectName || ""; $("#oCustAddr").textContent = c.Address || "";
       $("#oNoDau").textContent = nf0.format(c.NoDau || 0);
+      if ($("#oCustMst")) $("#oCustMst").textContent = c.MST || c.MaSoThue || "";
       if (!$("#oPhone").value) $("#oPhone").value = c.Phone || "";
       if (c.LoaiDon && c.LoaiDon !== ent.loai) showMsg([`Khách ${c.ObjectID} thuộc loại đơn ${c.LoaiDon}, không nhập ở màn hình ${ent.ten}.`]);
       else showMsg([]);
@@ -679,6 +700,7 @@ async function pageOrder(seq, id, key) {
     showMsg([]);
     const body = {
       DocumentID: key, DocumentDate: $("#oNgay").value, DeliveryDate: $("#oGiao").value, ObjectID: custId(), EmployeeID: emp.value,
+      OutputType: outCombo ? outCombo.value : (outType || null),
       Phone: $("#oPhone").value.trim(), Memo: $("#oMemo").value.trim(), isTrongNgay: $("#oTrongNgay").checked,
       isKhongKM: $("#oKhongKM").checked, HoanTat: hoanTat,
       lines: st.lines.filter((l) => l.ItemID).map((l) => ({ ItemID: l.ItemID, Ket: l.Ket, Chai: l.Chai, KetKM: l.KetKM, ChaiKM: l.ChaiKM,

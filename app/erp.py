@@ -139,9 +139,17 @@ class Erp:
         return self.cached(("exists", name.lower()), load)
 
     # ------------------------------------------------------------------ menu + quyền
+    def _menu_table(self) -> str:
+        """Dùng bảng menu riêng của web (ZNQW_Menu) nếu có, không thì đọc WA_Menu như cũ."""
+        return "ZNQW_Menu" if self.object_exists("ZNQW_Menu") else "WA_Menu"
+
+    def _quyen_table(self) -> str:
+        return "ZNQW_MenuQuyen" if self.object_exists("ZNQW_MenuQuyen") else "WA_UserGroupPermisstion"
+
     def menu_all(self) -> list[dict]:
+        tbl = self._menu_table()
         return self.cached("menu", lambda: self.rows(
-            "SELECT MenuID, VN, Parent, IconClass, FormKey, FormName, isDisable FROM WA_Menu ORDER BY MenuID"))
+            f"SELECT MenuID, VN, Parent, IconClass, FormKey, FormName, isDisable FROM {tbl} ORDER BY MenuID"))
 
     def menu_item(self, menu_id: str) -> dict:
         for m in self.menu_all():
@@ -150,8 +158,9 @@ class Erp:
         raise ErpError("Không có menu " + str(menu_id))
 
     def group_permissions(self, group: str) -> dict[str, dict]:
+        tbl = self._quyen_table()
         def load():
-            rs = self.rows("SELECT MenuID, IsRun, IsAdd, IsUpdate, IsDelete, isExportExcel FROM WA_UserGroupPermisstion "
+            rs = self.rows(f"SELECT MenuID, IsRun, IsAdd, IsUpdate, IsDelete, isExportExcel FROM {tbl} "
                            "WHERE UserGroupID = :g", {"g": group})
             return {str(r["MenuID"]): r for r in rs}
         return self.cached(("perm", group), load)
@@ -529,6 +538,113 @@ class Erp:
                            "KiemTraCongNo FROM sy_WebLoaiDon WHERE IsSuDung = 1")
             return {r["FormName"]: r for r in rs}
         return self.cached("order_types", load)
+
+    # ------------------------------------------------------------------ cấu hình form (metadata-driven, bảng ZNQW_*)
+    def _fetch_all(self, cur) -> list[dict]:
+        if cur.description is None:
+            return []
+        cols = [c[0] for c in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    def form_config(self, ma_form: str) -> dict | None:
+        """Đọc cấu hình form từ ZNQW_Form_CauHinhStp (3 bảng kết quả) + nở sẵn options cho dropdown.
+        Trả None nếu chưa cài lớp cấu hình (form vẫn chạy theo mặc định như trước)."""
+        if not IDENT.match(ma_form or "") or not self.object_exists("ZNQW_Form_CauHinhStp"):
+            return None
+
+        def load():
+            raw_cn = self.engine.raw_connection()
+            try:
+                cur = raw_cn.cursor()
+                cur.execute("SET NOCOUNT ON; EXEC dbo.ZNQW_Form_CauHinhStp @MaForm = ?", [ma_form])
+                while cur.description is None:
+                    if not cur.nextset():
+                        return None
+                forms = self._fetch_all(cur)
+                cols = self._fetch_all(cur) if cur.nextset() else []
+                drops = self._fetch_all(cur) if cur.nextset() else []
+                while cur.nextset():
+                    pass
+                raw_cn.rollback()
+            finally:
+                raw_cn.close()
+            if not forms:
+                return None
+            f = forms[0]
+            vung: dict[str, list] = {"DON": [], "CHITIET": [], "LUOI": []}
+            for c in cols:
+                v = (c.get("Vung") or "").upper()
+                vung.setdefault(v, []).append({
+                    "name": c.get("TenCot"), "label": c.get("Nhan"), "kieu": (c.get("Kieu") or "TEXT").upper(),
+                    "thu_tu": c.get("ThuTu"), "bat_buoc": bool(c.get("BatBuoc")), "chi_doc": bool(c.get("ChiDoc")),
+                    "mac_dinh": c.get("GiaTriMacDinh"), "cong_thuc": c.get("CongThuc"),
+                    "pham_vi": (c.get("PhamViCongThuc") or "").upper() or None, "dropdown": c.get("MaDropdown"),
+                    "nhom_sua": c.get("NhomDuocSua"), "do_rong": c.get("DoRong"),
+                })
+            dropdowns: dict[str, list] = {}
+            for d in drops:
+                ma, sql = d.get("MaDropdown"), d.get("CauSQL")
+                if not ma or not sql:
+                    continue
+                try:
+                    rs = self.rows(sql, limit=config.MAX_ROWS)
+                except Exception:
+                    rs = []
+                opts = []
+                for r in rs:
+                    gv = _get_ci(r, "GiaTri")
+                    if gv is None:
+                        continue
+                    ht = _get_ci(r, "HienThi")
+                    opts.append({"value": str(gv), "label": str(ht) if ht not in (None, "") else str(gv)})
+                dropdowns[ma] = opts
+            return {
+                "ma_form": f.get("MaForm"), "ten_form": f.get("TenForm"), "nguon_luoi": f.get("NguonLuoi"),
+                "dieu_kien_luoi": f.get("DieuKienLuoi"), "sap_xep_luoi": f.get("SapXepLuoi"),
+                "loai_don": f.get("LoaiDon"), "store_su_kien": f.get("StoreSuKien"),
+                "vung": vung, "dropdowns": dropdowns,
+            }
+        return self.cached(("form_config", ma_form.lower()), load)
+
+    def form_config_by_loaidon(self, loai: str) -> dict | None:
+        """Tìm cấu hình form theo LoaiDon (map menu đơn hàng -> MaForm trong ZNQW_Form)."""
+        if not loai or not self.object_exists("ZNQW_Form"):
+            return None
+        def find():
+            rs = self.rows("SELECT MaForm FROM dbo.ZNQW_Form WHERE LoaiDon = :l", {"l": loai})
+            return rs[0]["MaForm"] if rs else None
+        ma = self.cached(("form_by_loai", (loai or "").lower()), find)
+        return self.form_config(ma) if ma else None
+
+    def form_event(self, store: str, event: str, doc: str = "", obj: str = "", emp: str = "",
+                   output: str = "", ngay: date | None = None) -> list[dict]:
+        """Gọi store sự kiện (trước/sau lưu, trước/sau xóa). Trả [{Loai, NoiDung}]. Không cache."""
+        if not store or not IDENT.match(store) or not self.object_exists(store):
+            return []
+        args = [("SuKien", event), ("DocumentID", doc or ""), ("ObjectID", obj or ""),
+                ("EmployeeID", emp or ""), ("OutputType", output or ""),
+                ("DocumentDate", _dt(ngay) if ngay else None)]
+        try:
+            rows = self.call_proc(store, args, write=False)
+        except Exception:
+            return []
+        out = []
+        for r in rows:
+            nd = _get_ci(r, "NoiDung")
+            if nd in (None, ""):
+                continue
+            try:
+                loai = int(_get_ci(r, "Loai") or 2)
+            except (TypeError, ValueError):
+                loai = 2
+            out.append({"loai": loai, "noi_dung": str(nd)})
+        return out
+
+    def set_output_type(self, doc: str, output: str) -> None:
+        """Lưu OutputType cho đơn (store mới ZNQW_DonLe_SetOutputTypeStp, không đụng store cũ)."""
+        if not doc or not output or not self.object_exists("ZNQW_DonLe_SetOutputTypeStp"):
+            return
+        self.call_proc("ZNQW_DonLe_SetOutputTypeStp", [("DocumentID", doc), ("OutputType", output)], write=True)
 
     def order_doc(self, key: str) -> tuple[dict | None, list[dict]]:
         t, l = self.top(1)

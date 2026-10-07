@@ -384,6 +384,7 @@ class OrderIn(BaseModel):
     DeliveryDate: str | None = None
     ObjectID: str
     EmployeeID: str
+    OutputType: str | None = None
     Phone: str | None = None
     Memo: str | None = None
     isTrongNgay: bool = False
@@ -406,6 +407,31 @@ def _order_ctx(u: dict, menu_id: str, need: str | None = None) -> tuple[dict, di
 
 def _emp_for(u: dict, emp: str | None) -> str:
     return u["ma_nv"] if u["ma_nv"] else (emp or "").strip()
+
+
+def _field_locked(u: dict, col: dict) -> bool:
+    """Field có NhomDuocSua: chỉ các nhóm đó mới được sửa (rỗng = ai cũng sửa).
+    Admin web luôn được sửa."""
+    groups = (col.get("nhom_sua") or "").strip()
+    if not groups or u["la_admin"]:
+        return False
+    allow = {g.strip().lower() for g in groups.split(",") if g.strip()}
+    return (u.get("nhom") or "").strip().lower() not in allow
+
+
+@app.get("/api/order/{menu_id}/config")
+def order_config(menu_id: str, u: dict = Depends(current_user)):
+    """Cấu hình form đơn hàng đọc từ bảng ZNQW_* (metadata-driven).
+    Nếu chưa cài lớp cấu hình thì trả cfg=None, web dùng bố cục mặc định như trước."""
+    _, ent = _order_ctx(u, menu_id)
+    cfg = erp().form_config_by_loaidon(ent["loai"])
+    if not cfg:
+        return {"cfg": None}
+    # đánh dấu field nào bị khóa theo nhóm người dùng hiện tại
+    for vung in cfg["vung"].values():
+        for c in vung:
+            c["locked"] = _field_locked(u, c) or c.get("chi_doc", False)
+    return {"cfg": cfg, "is_admin": bool(u["la_admin"]), "ma_nv": u["ma_nv"]}
 
 
 def _rows_out(rows: list[dict]) -> list[dict]:
@@ -512,6 +538,17 @@ def order_save(menu_id: str, body: OrderIn, u: dict = Depends(current_user)):
             raise HTTPException(404, "Không tìm thấy đơn " + body.DocumentID)
         if u["ma_nv"] and head.get("EmployeeID") != u["ma_nv"]:
             raise HTTPException(403, "Bạn chỉ được sửa đơn của nhân viên " + u["ma_nv"])
+    # --- Sự kiện TRƯỚC KHI LƯU: store cấu hình có thể chặn hoặc cảnh báo ---
+    cfg = erp().form_config_by_loaidon(ent["loai"])
+    store_sk = cfg.get("store_su_kien") if cfg else None
+    sk_info: list[str] = []
+    if store_sk:
+        msgs = erp().form_event(store_sk, "TRUOC_LUU", doc=body.DocumentID.strip(), obj=body.ObjectID.strip(),
+                                emp=emp, output=(body.OutputType or ""), ngay=_to_date(body.DocumentDate))
+        chan = [m["noi_dung"] for m in msgs if m["loai"] == 1]
+        if chan:
+            return JSONResponse({"ok": False, "errors": chan, "warnings": []}, status_code=422)
+        sk_info = [m["noi_dung"] for m in msgs if m["loai"] in (0, 2)]
     args = [("DocumentID", body.DocumentID.strip()), ("LoaiDon", ent["loai"]), ("DocumentDate", _to_date(body.DocumentDate)),
             ("DeliveryDate", _to_date(body.DeliveryDate) or _to_date(body.DocumentDate)), ("ObjectID", body.ObjectID.strip()),
             ("EmployeeID", emp), ("Phone", (body.Phone or "").strip()[:50] or None), ("Memo", (body.Memo or "").strip()[:200] or None),
@@ -521,24 +558,45 @@ def order_save(menu_id: str, body: OrderIn, u: dict = Depends(current_user)):
     errors, warns, doc = _messages(rows)
     if errors or not doc:
         return JSONResponse({"ok": False, "errors": errors or ["Không lưu được đơn hàng"], "warnings": warns}, status_code=422)
+    # --- Lưu OutputType (store mới, không đụng store lưu cũ) ---
+    if body.OutputType:
+        try:
+            erp().set_output_type(doc, body.OutputType.strip())
+        except Exception:
+            pass
+    # --- Sự kiện SAU KHI LƯU: lấy thêm thông báo (vd nhắc giao hàng) ---
+    if store_sk:
+        for mm in erp().form_event(store_sk, "SAU_LUU", doc=doc, obj=body.ObjectID.strip(), emp=emp,
+                                   output=(body.OutputType or ""), ngay=_to_date(body.DocumentDate)):
+            sk_info.append(mm["noi_dung"])
     appdb.log(u["ten_dang_nhap"], "Thêm đơn" if new else "Sửa đơn", f"{m['VN']}: {doc}")
-    return {"ok": True, "DocumentID": doc, "warnings": warns}
+    return {"ok": True, "DocumentID": doc, "warnings": warns + sk_info}
 
 
 @app.delete("/api/order/{menu_id}/doc/{key:path}")
 def order_delete(menu_id: str, key: str, u: dict = Depends(current_user)):
-    m, _ = _order_ctx(u, menu_id, "delete")
+    m, ent = _order_ctx(u, menu_id, "delete")
     head, _ = erp().order_doc(key)
     if not head:
         raise HTTPException(404, "Không tìm thấy đơn " + key)
     if u["ma_nv"] and head.get("EmployeeID") != u["ma_nv"]:
         raise HTTPException(403, "Bạn chỉ được xóa đơn của nhân viên " + u["ma_nv"])
+    cfg = erp().form_config_by_loaidon(ent["loai"])
+    store_sk = cfg.get("store_su_kien") if cfg else None
+    if store_sk:
+        chan = [mm["noi_dung"] for mm in erp().form_event(store_sk, "TRUOC_XOA", doc=key,
+                obj=str(head.get("ObjectID") or ""), emp=str(head.get("EmployeeID") or "")) if mm["loai"] == 1]
+        if chan:
+            raise HTTPException(400, "; ".join(chan))
     rows = erp().call_proc("NQW_DonHang_XoaStp", [("DocumentID", key), ("User", u["ten_dang_nhap"][:20])], write=True)
     errors, _, _ = _messages(rows)
     if errors:
         raise HTTPException(400, "; ".join(errors))
+    info = []
+    if store_sk:
+        info = [mm["noi_dung"] for mm in erp().form_event(store_sk, "SAU_XOA", doc=key)]
     appdb.log(u["ten_dang_nhap"], "Xóa đơn", f"{m['VN']}: {key}")
-    return {"ok": True}
+    return {"ok": True, "messages": info}
 
 
 # ---------------------------------------------------------------------- báo cáo
